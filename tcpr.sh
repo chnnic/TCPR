@@ -2,6 +2,10 @@
 # tcpr - 交互式管理 TCP-preconnection-relay
 # Version: 0.0.1
 # 依赖：已安装 tcp-pool-parse 和 tcp-pool@.service（即原 install 脚本跑过）
+#
+# 一键安装（任意机器，root）：
+#   bash <(curl -fsSL https://raw.githubusercontent.com/chnnic/TCPR/refs/heads/main/tcpr.sh) --install
+# 之后任意位置输入 tcpr 进入菜单。
 
 set -uo pipefail
 
@@ -10,6 +14,7 @@ VERSION="0.0.1"
 CONF="/etc/tcp_pool/relays.conf"
 CONF_DIR="/etc/tcp_pool"
 INSTALL_PATH="/usr/local/bin/tcpr"
+REMOTE_URL="https://raw.githubusercontent.com/chnnic/TCPR/refs/heads/main/tcpr.sh"
 
 # ---------- 通用工具 ----------
 need_root() {
@@ -21,11 +26,12 @@ need_root() {
 
 ensure_files() {
     if [ ! -f "$CONF" ]; then
-        echo "找不到 $CONF，请先跑安装脚本。" >&2
+        echo "找不到 $CONF，请先跑上游 TCP-preconnection-relay 的 install.sh：" >&2
+        echo "  bash <(curl -L https://raw.githubusercontent.com/Xeloan/TCP-preconnection-relay/main/install.sh)" >&2
         exit 1
     fi
     if [ ! -x /usr/local/bin/tcp-pool-parse ]; then
-        echo "找不到 tcp-pool-parse，请先跑安装脚本。" >&2
+        echo "找不到 tcp-pool-parse，请先跑上游 install.sh。" >&2
         exit 1
     fi
 }
@@ -44,10 +50,41 @@ is_valid_tag() {
     [[ "$1" =~ ^[A-Za-z0-9_-]+$ ]]
 }
 
-# ---------- 快捷键安装/卸载 ----------
-# 把当前脚本复制到 /usr/local/bin/tcpr，之后任意位置输入 tcpr 即可
+# ---------- 一键安装/更新 ----------
+# 从 GitHub 拉最新脚本到 INSTALL_PATH，并赋可执行权限。
+# 既可作为命令行参数 --install 使用，也可从菜单调用。
+remote_install() {
+    need_root
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "需要 curl，请先 apt install curl" >&2
+        return 1
+    fi
+
+    local tmp
+    tmp="$(mktemp)" || return 1
+
+    echo "正在从 GitHub 下载最新 tcpr ..."
+    if ! curl -fsSL "$REMOTE_URL" -o "$tmp"; then
+        echo "下载失败：$REMOTE_URL" >&2
+        rm -f "$tmp"
+        return 1
+    fi
+
+    # 简单完整性检查
+    if ! head -1 "$tmp" | grep -q '^#!/bin/bash'; then
+        echo "下载内容不像合法的 bash 脚本，已取消" >&2
+        rm -f "$tmp"
+        return 1
+    fi
+
+    mv "$tmp" "$INSTALL_PATH"
+    chmod +x "$INSTALL_PATH"
+    echo "已安装到 $INSTALL_PATH"
+    echo "现在可在任意位置输入：tcpr"
+}
+
+# ---------- 快捷键安装/卸载（从本地脚本复制） ----------
 script_self_path() {
-    # 解析当前脚本的真实路径（处理软链）
     local src="${BASH_SOURCE[0]}"
     while [ -L "$src" ]; do
         local dir
@@ -62,12 +99,12 @@ is_shortcut_installed() {
     [ -x "$INSTALL_PATH" ]
 }
 
-action_install_shortcut() {
+action_install_shortcut_local() {
     local self
     self="$(script_self_path)"
 
     if [ "$self" = "$INSTALL_PATH" ]; then
-        echo "当前就是从 $INSTALL_PATH 运行的，无需安装。"
+        echo "当前就是从 $INSTALL_PATH 运行的，无需重复安装。"
         return
     fi
 
@@ -82,6 +119,17 @@ action_install_shortcut() {
     cp -f "$self" "$INSTALL_PATH"
     chmod +x "$INSTALL_PATH"
     echo "已安装：现在可以在任何位置输入 tcpr 进入此菜单"
+}
+
+action_install_shortcut_remote() {
+    if [ -e "$INSTALL_PATH" ]; then
+        read -r -p "$INSTALL_PATH 已存在，是否用 GitHub 最新版覆盖？ [y/N]: " a
+        case "$a" in
+            y|Y) ;;
+            *) echo "已取消"; return ;;
+        esac
+    fi
+    remote_install
 }
 
 action_uninstall_shortcut() {
@@ -100,7 +148,7 @@ action_uninstall_shortcut() {
     echo "快捷键已卸载"
 }
 
-# ---------- 解析 relays.conf 列出所有 [tag] ----------
+# ---------- 解析 relays.conf ----------
 list_tags() {
     awk '
         /^[[:space:]]*\[.*\][[:space:]]*$/ {
@@ -112,7 +160,6 @@ list_tags() {
     ' "$CONF"
 }
 
-# 提取某 tag 对应的整个 section（从 [tag] 行到下一个 [ 之前，含 [tag] 行）
 extract_section() {
     local tag="$1"
     awk -v t="$tag" '
@@ -129,7 +176,6 @@ extract_section() {
 }
 
 get_field() {
-    # get_field <tag> <KEY>
     local tag="$1" key="$2"
     extract_section "$tag" | awk -F= -v k="$key" '
         $1 ~ "^[[:space:]]*"k"[[:space:]]*$" {
@@ -190,7 +236,6 @@ show_list() {
     echo "============================================================"
 }
 
-# 选 tag：输入序号或 tag 名，返回 tag；支持 "all"
 pick_tag() {
     local prompt="${1:-请输入序号或标签名}"
     mapfile -t tags < <(list_tags)
@@ -446,18 +491,19 @@ main_menu() {
         show_list
         cat <<MENU
 
-  1) 新增实例 (add)
-  2) 修改实例 (edit IP / 端口)
-  3) 删除实例 (del)
-  4) 启动实例 (start)
-  5) 停止实例 (stop)
-  6) 重启实例 (restart)
-  7) 查看实例日志 (log)
-  8) 一键重启全部 (tcp-pool-start)
-  9) 编辑原始 relays.conf (nano)
- 10) 安装快捷键 tcpr 到 $INSTALL_PATH
- 11) 卸载快捷键
-  0) 退出
+  1)  新增实例 (add)
+  2)  修改实例 (edit IP / 端口)
+  3)  删除实例 (del)
+  4)  启动实例 (start)
+  5)  停止实例 (stop)
+  6)  重启实例 (restart)
+  7)  查看实例日志 (log)
+  8)  一键重启全部 (tcp-pool-start)
+  9)  编辑原始 relays.conf (nano)
+ 10)  从 GitHub 安装/更新 tcpr 到 $INSTALL_PATH
+ 11)  把当前本地脚本安装到 $INSTALL_PATH
+ 12)  卸载快捷键
+  0)  退出
 
 MENU
         read -r -p "选择: " opt
@@ -471,8 +517,9 @@ MENU
             7)  action_log ;;
             8)  apply_all; pause ;;
             9)  nano "$CONF"; apply_all; pause ;;
-            10) action_install_shortcut; pause ;;
-            11) action_uninstall_shortcut; pause ;;
+            10) action_install_shortcut_remote; pause ;;
+            11) action_install_shortcut_local; pause ;;
+            12) action_uninstall_shortcut; pause ;;
             0)  exit 0 ;;
             *)  echo "无效选项"; pause ;;
         esac
@@ -480,6 +527,35 @@ MENU
 }
 
 # ---------- 入口 ----------
+
+# 命令行模式：bash <(curl ...) --install  或  tcpr --install / --update
+case "${1:-}" in
+    --install|--update|-i)
+        remote_install
+        exit $?
+        ;;
+    --version|-v)
+        echo "tcpr $VERSION"
+        exit 0
+        ;;
+    --help|-h)
+        cat <<HELP
+tcpr v$VERSION - TCP-preconnection-relay 管理工具
+
+用法：
+  tcpr                 进入交互菜单
+  tcpr --install       从 GitHub 拉取最新版并安装到 $INSTALL_PATH
+  tcpr --update        同 --install
+  tcpr --version       显示版本
+  tcpr --help          显示本帮助
+
+一键安装命令（无需先下载）：
+  bash <(curl -fsSL $REMOTE_URL) --install
+HELP
+        exit 0
+        ;;
+esac
+
 need_root
 ensure_files
 main_menu
