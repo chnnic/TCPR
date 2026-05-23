@@ -15,6 +15,7 @@ CONF="/etc/tcp_pool/relays.conf"
 CONF_DIR="/etc/tcp_pool"
 INSTALL_PATH="/usr/local/bin/tcpr"
 REMOTE_URL="https://raw.githubusercontent.com/chnnic/TCPR/refs/heads/main/tcpr.sh"
+UPSTREAM_INSTALL_URL="https://raw.githubusercontent.com/chnnic/TCPR/refs/heads/main/install.sh"
 
 # ---------- 通用工具 ----------
 need_root() {
@@ -27,12 +28,50 @@ need_root() {
 ensure_files() {
     if [ ! -f "$CONF" ]; then
         echo "找不到 $CONF，请先跑上游 TCP-preconnection-relay 的 install.sh：" >&2
-        echo "  bash <(curl -L https://raw.githubusercontent.com/Xeloan/TCP-preconnection-relay/main/install.sh)" >&2
+        echo "  bash <(curl -L $UPSTREAM_INSTALL_URL)" >&2
         exit 1
     fi
     if [ ! -x /usr/local/bin/tcp-pool-parse ]; then
         echo "找不到 tcp-pool-parse，请先跑上游 install.sh。" >&2
         exit 1
+    fi
+}
+
+# 同样的检测但只返回布尔，给菜单用
+upstream_installed() {
+    [ -f "$CONF" ] && [ -x /usr/local/bin/tcp-pool-parse ]
+}
+
+# 一键安装上游 TCP-preconnection-relay
+action_install_upstream() {
+    if upstream_installed; then
+        echo "上游 TCP-preconnection-relay 已经安装。"
+        read -r -p "是否仍要重新跑一遍上游 install.sh？ [y/N]: " a
+        case "$a" in
+            y|Y) ;;
+            *) echo "已取消"; return ;;
+        esac
+    fi
+
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "需要 curl，请先 apt install curl" >&2
+        return 1
+    fi
+
+    echo "即将执行上游安装脚本："
+    echo "  $UPSTREAM_INSTALL_URL"
+    read -r -p "继续吗？ [Y/n]: " a
+    case "$a" in
+        n|N) echo "已取消"; return ;;
+    esac
+
+    bash <(curl -L "$UPSTREAM_INSTALL_URL")
+    echo
+    echo "上游安装流程结束。"
+    if upstream_installed; then
+        echo "检测到上游已安装成功，回车回到 tcpr 菜单..."
+    else
+        echo "看起来上游安装没完成，请检查报错。"
     fi
 }
 
@@ -476,6 +515,50 @@ action_log() {
     journalctl -u "tcp-pool@$tag" -f
 }
 
+# ---------- 上游未安装时的简化菜单 ----------
+upstream_missing_menu() {
+    while true; do
+        clear
+        local shortcut_status
+        if is_shortcut_installed; then
+            shortcut_status="已安装"
+        else
+            shortcut_status="未安装"
+        fi
+        echo "===== tcpr v${VERSION} ====="
+        echo "快捷键 ($INSTALL_PATH): $shortcut_status"
+        echo
+        echo "！ 未检测到上游 TCP-preconnection-relay"
+        echo "   缺少 $CONF 和/或 /usr/local/bin/tcp-pool-parse"
+        echo "   需要先安装上游才能管理预连接实例。"
+        cat <<MENU
+
+  1)  安装上游 TCP-preconnection-relay
+  2)  从 GitHub 安装/更新 tcpr 到 $INSTALL_PATH
+  3)  把当前本地脚本安装到 $INSTALL_PATH
+  4)  卸载快捷键
+  9)  重新检测（上游装好后选这个）
+  0)  退出
+
+MENU
+        read -r -p "选择: " opt
+        case "$opt" in
+            1) action_install_upstream; pause
+               if upstream_installed; then return 0; fi ;;
+            2) action_install_shortcut_remote; pause ;;
+            3) action_install_shortcut_local; pause ;;
+            4) action_uninstall_shortcut; pause ;;
+            9) if upstream_installed; then
+                   echo "已检测到上游，进入完整菜单..."; sleep 1; return 0
+               else
+                   echo "仍未检测到上游"; pause
+               fi ;;
+            0) exit 0 ;;
+            *) echo "无效选项"; pause ;;
+        esac
+    done
+}
+
 # ---------- 主菜单 ----------
 main_menu() {
     while true; do
@@ -503,6 +586,7 @@ main_menu() {
  10)  从 GitHub 安装/更新 tcpr 到 $INSTALL_PATH
  11)  把当前本地脚本安装到 $INSTALL_PATH
  12)  卸载快捷键
+ 13)  重装/更新上游 TCP-preconnection-relay
   0)  退出
 
 MENU
@@ -520,6 +604,7 @@ MENU
             10) action_install_shortcut_remote; pause ;;
             11) action_install_shortcut_local; pause ;;
             12) action_uninstall_shortcut; pause ;;
+            13) action_install_upstream; pause ;;
             0)  exit 0 ;;
             *)  echo "无效选项"; pause ;;
         esac
@@ -557,5 +642,10 @@ HELP
 esac
 
 need_root
+
+if ! upstream_installed; then
+    upstream_missing_menu
+fi
+
 ensure_files
 main_menu
