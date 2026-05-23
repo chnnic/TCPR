@@ -122,6 +122,43 @@ remote_install() {
     echo "现在可在任意位置输入：tcpr"
 }
 
+# 非交互全卸载（命令行用）
+# 不询问、不交互，直接清理；保留 sysctl 配置文件由 --purge-sysctl 控制
+action_uninstall_all_noninteractive() {
+    local purge_sysctl="${1:-no}"
+
+    echo "[tcpr] 非交互全卸载开始..."
+
+    mapfile -t units < <(
+        {
+            systemctl list-units --full --all --no-legend 'tcp-pool@*.service' 2>/dev/null | awk '{print $1}'
+            systemctl list-unit-files --full --no-legend 'tcp-pool@*.service' 2>/dev/null | awk '{print $1}'
+        } | sort -u
+    )
+    for unit in "${units[@]}"; do
+        [ -n "$unit" ] || continue
+        systemctl stop "$unit" 2>/dev/null || true
+        systemctl disable "$unit" 2>/dev/null || true
+    done
+
+    rm -f /etc/systemd/system/tcp-pool@.service
+    systemctl daemon-reload || true
+
+    rm -f /usr/local/bin/tcp-pool-parse
+    rm -f /usr/local/bin/tcp-pool-start
+    rm -rf /etc/tcp_pool
+    rm -f /root/tcp_pool /root/tcp_pool.c
+
+    if [ "$purge_sysctl" = "yes" ]; then
+        rm -f /etc/sysctl.d/99-custom-network-tuning.conf
+        echo "[tcpr] 已删除 sysctl 调优配置（已运行的内核参数需重启才完全恢复）"
+    fi
+
+    rm -f "$INSTALL_PATH"
+
+    echo "[tcpr] 全卸载完成"
+}
+
 # ---------- 快捷键安装/卸载（从本地脚本复制） ----------
 script_self_path() {
     local src="${BASH_SOURCE[0]}"
@@ -185,6 +222,95 @@ action_uninstall_shortcut() {
 
     rm -f "$INSTALL_PATH"
     echo "快捷键已卸载"
+}
+
+# ---------- 全卸载 ----------
+# 卸载 tcpr 本身 + 上游 TCP-preconnection-relay 的全部痕迹
+action_uninstall_all() {
+    echo "============================================================"
+    echo "即将卸载以下内容："
+    echo "  - tcpr 快捷键          $INSTALL_PATH"
+    echo "  - 全部转发实例 systemd  tcp-pool@*.service (stop + disable)"
+    echo "  - systemd 模板         /etc/systemd/system/tcp-pool@.service"
+    echo "  - 上游辅助脚本         /usr/local/bin/tcp-pool-parse"
+    echo "                       /usr/local/bin/tcp-pool-start"
+    echo "  - 配置目录             /etc/tcp_pool/  (包含 relays.conf)"
+    echo "  - 核心二进制和源码     /root/tcp_pool  /root/tcp_pool.c"
+    echo "  - sysctl 调优配置      /etc/sysctl.d/99-custom-network-tuning.conf"
+    echo "============================================================"
+    echo "！ 这是不可逆操作，会删除所有配置。"
+    echo
+
+    read -r -p "确认全部卸载？请输入大写 YES 继续: " a
+    if [ "$a" != "YES" ]; then
+        echo "已取消"
+        return
+    fi
+
+    echo
+    echo "正在停止并禁用所有 tcp-pool@* 实例..."
+    mapfile -t units < <(
+        {
+            systemctl list-units --full --all --no-legend 'tcp-pool@*.service' 2>/dev/null | awk '{print $1}'
+            systemctl list-unit-files --full --no-legend 'tcp-pool@*.service' 2>/dev/null | awk '{print $1}'
+        } | sort -u
+    )
+    for unit in "${units[@]}"; do
+        [ -n "$unit" ] || continue
+        systemctl stop "$unit" 2>/dev/null || true
+        systemctl disable "$unit" 2>/dev/null || true
+        echo "  - 已处理 $unit"
+    done
+
+    echo "删除 systemd 模板..."
+    rm -f /etc/systemd/system/tcp-pool@.service
+    systemctl daemon-reload || true
+
+    echo "删除上游辅助脚本..."
+    rm -f /usr/local/bin/tcp-pool-parse
+    rm -f /usr/local/bin/tcp-pool-start
+
+    echo "删除配置目录..."
+    rm -rf /etc/tcp_pool
+
+    echo "删除核心二进制和源码..."
+    rm -f /root/tcp_pool /root/tcp_pool.c
+
+    echo "处理 sysctl 调优配置..."
+    if [ -f /etc/sysctl.d/99-custom-network-tuning.conf ]; then
+        read -r -p "是否一并删除 99-custom-network-tuning.conf（不会回滚已生效的内核参数，需重启才完全恢复）？ [y/N]: " sa
+        case "$sa" in
+            y|Y)
+                rm -f /etc/sysctl.d/99-custom-network-tuning.conf
+                echo "已删除。注意：当前已生效的 sysctl 参数仍在运行内核中，重启后会回到系统默认。"
+                ;;
+            *)
+                echo "已保留 sysctl 配置"
+                ;;
+        esac
+    fi
+
+    echo "删除 tcpr 快捷键..."
+    if [ -e "$INSTALL_PATH" ]; then
+        rm -f "$INSTALL_PATH"
+    fi
+
+    echo
+    echo "============================================================"
+    echo "全部卸载完成。"
+    echo "============================================================"
+
+    # 如果当前脚本正是从 INSTALL_PATH 跑的，提示一下退出
+    local self
+    self="$(script_self_path)"
+    if [ "$self" = "$INSTALL_PATH" ] || [ ! -e "$self" ]; then
+        echo "tcpr 自身已被删除，本次会话结束后即不可再用。"
+    else
+        echo "本地脚本 $self 仍保留，可手动 rm 删除。"
+    fi
+    echo "按回车后退出 tcpr..."
+    read -r _
+    exit 0
 }
 
 # ---------- 解析 relays.conf ----------
@@ -537,6 +663,7 @@ upstream_missing_menu() {
   2)  从 GitHub 安装/更新 tcpr 到 $INSTALL_PATH
   3)  把当前本地脚本安装到 $INSTALL_PATH
   4)  卸载快捷键
+  5)  全卸载（清理 tcpr + 所有上游残留）
   9)  重新检测（上游装好后选这个）
   0)  退出
 
@@ -548,6 +675,7 @@ MENU
             2) action_install_shortcut_remote; pause ;;
             3) action_install_shortcut_local; pause ;;
             4) action_uninstall_shortcut; pause ;;
+            5) action_uninstall_all ;;
             9) if upstream_installed; then
                    echo "已检测到上游，进入完整菜单..."; sleep 1; return 0
                else
@@ -587,6 +715,7 @@ main_menu() {
  11)  把当前本地脚本安装到 $INSTALL_PATH
  12)  卸载快捷键
  13)  重装/更新上游 TCP-preconnection-relay
+ 14)  全卸载（清理 tcpr + 所有上游残留）
   0)  退出
 
 MENU
@@ -605,6 +734,7 @@ MENU
             11) action_install_shortcut_local; pause ;;
             12) action_uninstall_shortcut; pause ;;
             13) action_install_upstream; pause ;;
+            14) action_uninstall_all ;;
             0)  exit 0 ;;
             *)  echo "无效选项"; pause ;;
         esac
@@ -619,6 +749,15 @@ case "${1:-}" in
         remote_install
         exit $?
         ;;
+    --uninstall-all)
+        need_root
+        purge=no
+        if [ "${2:-}" = "--purge-sysctl" ]; then
+            purge=yes
+        fi
+        action_uninstall_all_noninteractive "$purge"
+        exit 0
+        ;;
     --version|-v)
         echo "tcpr $VERSION"
         exit 0
@@ -628,14 +767,20 @@ case "${1:-}" in
 tcpr v$VERSION - TCP-preconnection-relay 管理工具
 
 用法：
-  tcpr                 进入交互菜单
-  tcpr --install       从 GitHub 拉取最新版并安装到 $INSTALL_PATH
-  tcpr --update        同 --install
-  tcpr --version       显示版本
-  tcpr --help          显示本帮助
+  tcpr                       进入交互菜单
+  tcpr --install             从 GitHub 拉取最新版并安装到 $INSTALL_PATH
+  tcpr --update              同 --install
+  tcpr --uninstall-all       非交互全卸载（保留 sysctl 调优）
+  tcpr --uninstall-all --purge-sysctl
+                             非交互全卸载，并删除 sysctl 调优配置
+  tcpr --version             显示版本
+  tcpr --help                显示本帮助
 
 一键安装命令（无需先下载）：
   bash <(curl -fsSL $REMOTE_URL) --install
+
+一键全卸载命令（无需先下载，需要 tcpr 已安装在 $INSTALL_PATH）：
+  tcpr --uninstall-all
 HELP
         exit 0
         ;;
